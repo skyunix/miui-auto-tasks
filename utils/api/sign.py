@@ -402,6 +402,177 @@ class WxSign(BaseSign):
     URL_SIGN = "https://api.vip.miui.com/mtop/planet/vip/member/addCommunityGrowUpPointByActionV2"
 
 
+class LotteryDraw(BaseSign):
+    """
+    2026夏日感恩回馈大抽奖
+    """
+
+    NAME = "2026夏日感恩回馈大抽奖"
+
+    PARAMS = {
+        "ref": "vipAccountShortcut",
+        "pathname": "/mio/blindBox/lottery",
+        "version": "dev.231026",
+        "miui_vip_a_ph": "{miui_vip_a_ph}",
+    }
+    URL_ALREADY_SIGN_UP = (
+        "https://api-alpha.vip.miui.com/mtop/planet/blindbox/alreadySignUp"
+    )
+    URL_SIGN_UP = "https://api-alpha.vip.miui.com/mtop/planet/blindbox/signUp"
+    URL_PAGE = "https://api-alpha.vip.miui.com/mtop/planet/blindbox/lottery/page"
+    URL_SIGN = "https://api-alpha.vip.miui.com/mtop/planet/blindbox/lottery/draw"
+
+    MAX_DRAW = 20
+    """单次运行最大抽奖次数，防止异常时无限循环"""
+
+    DRAW_INTERVAL = 4
+    """每次抽奖间隔（秒），避免触发“操作频繁”限制"""
+
+    def _prepare_params(self):
+        """构造请求参数"""
+        params = self.PARAMS.copy()
+        if "miui_vip_a_ph" in self.cookies:
+            params["miui_vip_a_ph"] = self.cookies["miui_vip_a_ph"]
+        self.params.update(params)
+        self.params["version"] = self.user_agent.split("/")[-1]
+
+    def _post_form(self, url: str):
+        """使用 multipart 表单发送 POST 请求（携带 miui_vip_a_ph）"""
+        data = {"miui_vip_a_ph": self.cookies.get("miui_vip_a_ph", "")}
+        boundary = f'----WebKitFormBoundaryZ{get_random_chars_as_string(16, "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")}'
+        encoder = MultipartEncoder(fields=data, boundary=boundary)
+        headers = self.headers.copy()
+        headers["Content-Type"] = encoder.content_type
+        return post(
+            url,
+            params=self.params,
+            data=encoder,
+            cookies=self.cookies,
+            headers=headers,
+        )
+
+    def _sign_up(self) -> bool:
+        """报名活动"""
+        try:
+            for attempt in Retrying(stop=stop_after_attempt(3)):
+                with attempt:
+                    response = self._post_form(self.URL_SIGN_UP)
+                    log.debug(response.text)
+                    api_data = ApiResultHandler(response.json())
+                    if api_data.success:
+                        log.success(f"{self.NAME}: 报名成功")
+                        return True
+                    log.error(f"{self.NAME}报名失败：{api_data.message}")
+                    return False
+        except RetryError:
+            log.exception(f"{self.NAME}报名异常")
+            return False
+
+    def _draw_once(self) -> Tuple[bool, str]:
+        """执行一次抽奖"""
+        response = self._post_form(self.URL_SIGN)
+        log.debug(response.text)
+        api_data = SignResultHandler(response.json())
+        if api_data:
+            award = ""
+            if isinstance(api_data.data, dict):
+                award = api_data.data.get("awardName", "").replace("<br>", " ")
+            log.success(
+                f"{self.NAME}结果: 抽中 {award}"
+                if award
+                else f"{self.NAME}结果: {api_data.message}"
+            )
+            return True, "None"
+        elif api_data.ck_invalid:
+            log.error(f"{self.NAME}失败: Cookie无效")
+            return False, "cookie"
+        elif "频繁" in api_data.message:
+            log.warning(f"{self.NAME}: {api_data.message}")
+            return False, "busy"
+        else:
+            log.error(f"{self.NAME}失败：{api_data.message}")
+            return False, "None"
+
+    def sign(self) -> Tuple[bool, str]:
+        """大抽奖任务处理器：检查报名 -> 获取剩余次数 -> 循环抽奖"""
+        response = None
+        try:
+            self._prepare_params()
+            # 1. 检查是否已报名活动，未报名则自动报名
+            for attempt in Retrying(stop=stop_after_attempt(3)):
+                with attempt:
+                    response = get(
+                        self.URL_ALREADY_SIGN_UP,
+                        params=self.params,
+                        cookies=self.cookies,
+                        headers=self.headers,
+                    )
+                    log.debug(response.text)
+                    sign_up_data = ApiResultHandler(response.json())
+                    if sign_up_data.status == 401:
+                        log.error(f"{self.NAME}失败: Cookie无效")
+                        return False, "cookie"
+                    if not sign_up_data.success:
+                        log.error(f"{self.NAME}检查报名状态失败：{sign_up_data.message}")
+                        return False, "None"
+                    if not sign_up_data.data:
+                        log.info(f"{self.NAME}尚未报名，尝试自动报名")
+                        if not self._sign_up():
+                            return False, "None"
+
+            # 2. 获取抽奖页面信息，得到剩余抽奖次数
+            draw_count = 0
+            for attempt in Retrying(stop=stop_after_attempt(3)):
+                with attempt:
+                    response = get(
+                        self.URL_PAGE,
+                        params=self.params,
+                        cookies=self.cookies,
+                        headers=self.headers,
+                    )
+                    log.debug(response.text)
+                    page_data = ApiResultHandler(response.json())
+                    if not page_data.success:
+                        log.error(f"获取{self.NAME}页面失败：{page_data.message}")
+                        return False, "None"
+                    if isinstance(page_data.data, dict):
+                        draw_count = page_data.data.get("unlockCnt", 0) or 0
+
+            if draw_count <= 0:
+                log.info(f"{self.NAME}: 暂无可用抽奖次数")
+                return True, "None"
+
+            # 3. 循环抽奖，直到次数用尽或抽奖失败
+            log.info(f"{self.NAME}: 剩余 {draw_count} 次抽奖机会")
+            status, reason = True, "None"
+            total = min(draw_count, self.MAX_DRAW)
+            index = 0
+            busy_retries = 0
+            while index < total:
+                if index > 0:
+                    time.sleep(self.DRAW_INTERVAL)
+                status, reason = self._draw_once()
+                if status:
+                    index += 1
+                    busy_retries = 0
+                    continue
+                if reason == "busy" and busy_retries < 3:
+                    # 操作频繁，等待后重试当前次（不消耗次数）
+                    busy_retries += 1
+                    time.sleep(self.DRAW_INTERVAL)
+                    continue
+                break
+            return (status, reason) if reason != "busy" else (True, "None")
+        except RetryError as error:
+            if is_incorrect_return(error):
+                log.exception(
+                    f"{self.NAME} - 服务器没有正确返回 {response.text if response else ''}"
+                )
+            else:
+                log.exception(f"{self.NAME}出错")
+            return False, "None"
+
+
 # 注册签到任务
 BaseSign.AVAILABLE_SIGNS[WxSign.NAME] = WxSign
 BaseSign.AVAILABLE_SIGNS[CheckIn.NAME] = CheckIn
@@ -413,3 +584,4 @@ BaseSign.AVAILABLE_SIGNS[BoardFollow.NAME] = BoardFollow
 BaseSign.AVAILABLE_SIGNS[BoardUnFollow.NAME] = BoardUnFollow
 BaseSign.AVAILABLE_SIGNS[ThumbUp.NAME] = ThumbUp
 BaseSign.AVAILABLE_SIGNS[CarrotPull.NAME] = CarrotPull
+BaseSign.AVAILABLE_SIGNS[LotteryDraw.NAME] = LotteryDraw

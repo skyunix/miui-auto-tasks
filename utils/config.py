@@ -78,6 +78,7 @@ class Account:
         BoardFollow=False,
         CarrotPull=False,
         WxSign=False,
+        LotteryDraw=False,
     ):
         self.uid = uid
         """账户ID 非账户用户名或手机号"""
@@ -111,6 +112,8 @@ class Account:
         """社区拔萝卜，启用功能意味着你愿意自行承担相关风险"""
         self.WxSign = WxSign
         """微信小程序签到，启用功能意味着你愿意自行承担相关风险"""
+        self.LotteryDraw = LotteryDraw
+        """2026夏日感恩回馈大抽奖，启用功能意味着你愿意自行承担相关风险"""
 
     def _password(self, password: str):
         if len(password) == 32:
