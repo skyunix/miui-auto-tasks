@@ -428,6 +428,9 @@ class LotteryDraw(BaseSign):
     DRAW_INTERVAL = 4
     """每次抽奖间隔（秒），避免触发“操作频繁”限制"""
 
+    SCORE_PER_UNLOCK = 15
+    """每提升 15 成长值可获得 1 次解锁（抽奖）机会"""
+
     def _prepare_params(self):
         """构造请求参数"""
         params = self.PARAMS.copy()
@@ -520,8 +523,9 @@ class LotteryDraw(BaseSign):
                         if not self._sign_up():
                             return False, "None"
 
-            # 2. 获取抽奖页面信息，得到剩余抽奖次数
+            # 2. 获取抽奖页面信息，得到剩余抽奖次数与成长值
             draw_count = 0
+            score = 0
             for attempt in Retrying(stop=stop_after_attempt(3)):
                 with attempt:
                     response = get(
@@ -537,9 +541,15 @@ class LotteryDraw(BaseSign):
                         return False, "None"
                     if isinstance(page_data.data, dict):
                         draw_count = page_data.data.get("unlockCnt", 0) or 0
+                        score = page_data.data.get("score", 0) or 0
 
             if draw_count <= 0:
-                log.info(f"{self.NAME}: 暂无可用抽奖次数")
+                # 无可用次数时，根据成长值提示距下次解锁还差多少
+                need = self.SCORE_PER_UNLOCK - (score % self.SCORE_PER_UNLOCK)
+                log.info(
+                    f"{self.NAME}: 暂无可用抽奖次数，当前成长值 {score}，"
+                    f"再提升 {need} 成长值可获得 1 次解锁机会"
+                )
                 return True, "None"
 
             # 3. 循环抽奖，直到次数用尽或抽奖失败
